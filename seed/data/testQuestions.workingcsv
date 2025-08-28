@@ -1,0 +1,5 @@
+question_text,file_name,correct_answer,wrong_answer_1,wrong_answer_2,wrong_answer_3,wrong_answer_4,modulename,conceptname,level,problem_category_slug
+"What is the area of a triangle with a base of 10 cm and a height of 8 cm?",triangle_area.png,40,20,30,80,160,Area,Area of Triangles,1,PT
+"If a circle has a diameter of 14 inches, what is its circumference?",circle_circumference.png,44,22,7,14,28,Area,Circumference of Circles,1,PT
+"A rectangle has a length of 12 meters and a width of 5 meters. What is its perimeter?",rectangle_perimeter.png,34,24,60,17,29,Area,Perimeter of Rectangles,1,PSQ
+"Arepeat... rectangle has a length of 12 meters and a width of 5 meters. What is its perimeter?",rectangle_perimeter.png,34,24,60,17,29,Area,Perimeter of Rectangles,1,PSQ

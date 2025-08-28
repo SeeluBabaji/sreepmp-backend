@@ -1,0 +1,12 @@
+Flask
+Flask-SQLAlchemy
+PyMySQL
+PyJWT
+python-dotenv
+Flask-CORS
+Werkzeug
+cryptography
+gunicorn
+google-auth
+google-auth-oauthlib
+boto3
