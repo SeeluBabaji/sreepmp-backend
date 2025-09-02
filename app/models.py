@@ -104,6 +104,7 @@ class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=True)
+    # The project's own start/end dates are still useful for overall planning
     start_date = db.Column(db.DateTime, nullable=True)
     end_date = db.Column(db.DateTime, nullable=True)
     account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False)
@@ -111,15 +112,18 @@ class Project(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
     
-    # FIX: Removed the invalid/redundant 'account' relationship.
-    # The back-reference is now handled by Account.projects.
     account = db.relationship('Account', back_populates='projects')
-    
-    # FIX: Removed the redundant 'creator' relationship.
-    # The back-reference is handled by User.created_projects.
     creator = db.relationship('User', back_populates='created_projects')
     
-    tasks = db.relationship('Task', back_populates='project', lazy=True, cascade="all, delete-orphan")
+    # MODIFICATION: This relationship now specifically targets only top-level tasks.
+    # We use a `primaryjoin` to filter for tasks where `parent_id` is NULL.
+    tasks = db.relationship(
+        'Task', 
+        primaryjoin="and_(Project.id==Task.project_id, Task.parent_id==None)",
+        back_populates='project', 
+        lazy='dynamic', # Use 'dynamic' for further querying if needed
+        cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return f'<Project {self.name}>'
@@ -130,23 +134,51 @@ class Task(db.Model):
     name = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=True)
     status = db.Column(db.Enum(TaskStatusEnum), default=TaskStatusEnum.NOT_STARTED, nullable=False)
-    due_date = db.Column(db.DateTime, nullable=True)
+    
+    # --- MODIFICATION: Replaced due_date with start_date and duration ---
+    start_date = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    # Storing duration in seconds (as an Integer) is robust and database-agnostic.
+    duration = db.Column(db.Integer, nullable=False, default=86400) # Default to 1 day (in seconds)
+    
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
     assigned_to = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
-    project = db.relationship('Project', back_populates='tasks')
+    # --- NEW: Self-referential relationship for parent-child tasks ---
+    parent_id = db.Column(db.Integer, db.ForeignKey('tasks.id'), nullable=True)
     
-    # FIX: Removed redundant 'assignee' relationship. Handled by User.assigned_tasks
+    # This relationship links a task to its children.
+    children = db.relationship('Task', backref=db.backref('parent', remote_side=[id]), cascade="all, delete-orphan")
+    
+    # --- EXISTING RELATIONSHIPS ---
+    project = db.relationship('Project', back_populates='tasks', primaryjoin="Project.id==Task.project_id")
     assignee = db.relationship('User', back_populates='assigned_tasks')
     
-    # These self-referential relationships look correct.
-    dependencies = db.relationship('TaskDependency', foreign_keys='TaskDependency.task_id', backref='task', lazy=True, cascade="all, delete-orphan")
-    predecessors = db.relationship('TaskDependency', foreign_keys='TaskDependency.depends_on_task_id', backref='predecessor_task', lazy=True, cascade="all, delete-orphan")
+    # This relationship links a task to the tasks it depends on (its predecessors).
+    dependencies = db.relationship(
+        'Task',
+        secondary='task_dependencies',
+        primaryjoin="Task.id==task_dependencies.c.task_id",
+        secondaryjoin="Task.id==task_dependencies.c.depends_on_task_id",
+        backref='dependents' # A task can see which other tasks are dependent on it.
+    )
+
+    # --- NEW: Calculated property for end_date ---
+    @property
+    def end_date(self):
+        return self.start_date + datetime.timedelta(seconds=self.duration)
 
     def __repr__(self):
         return f'<Task {self.name}>'
+
+# The TaskDependency table is now a many-to-many association table.
+# It no longer needs to be a full model class unless you want to add extra data
+# to the relationship itself (like 'lag time').
+task_dependencies = db.Table('task_dependencies',
+    db.Column('task_id', db.Integer, db.ForeignKey('tasks.id'), primary_key=True),
+    db.Column('depends_on_task_id', db.Integer, db.ForeignKey('tasks.id'), primary_key=True)
+)
 
 # --- The rest of your models were mostly correct, just added back_populates for consistency ---
 
@@ -164,10 +196,7 @@ class UserProfile(db.Model):
     user = db.relationship('User', back_populates='profile')
     # ... other columns
 
-class TaskDependency(db.Model):
-    __tablename__ = 'task_dependencies'
-    task_id = db.Column(db.Integer, db.ForeignKey('tasks.id'), primary_key=True)
-    depends_on_task_id = db.Column(db.Integer, db.ForeignKey('tasks.id'), primary_key=True)
+
 
 # ErrorData model is fine as is, no relationships.
 class ErrorData(db.Model):
