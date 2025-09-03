@@ -153,3 +153,219 @@ def create_project(current_user):
         db.session.rollback()
         print(f"Error during project creation: {e}")
         return jsonify({'message': 'Error creating project and tasks', 'error': str(e)}), 500
+
+@projects_bp.route('/projects', methods=['GET'])
+@token_required
+def get_projects(current_user):
+    """
+    Retrieves a list of projects for the currently selected account of the user.
+    Requires 'account_id' as a query parameter.
+    """
+    account_id_str = request.args.get('account_id')
+
+    if not account_id_str:
+        return jsonify({'message': 'Account ID is required as a query parameter'}), 400
+
+    try:
+        account_id = int(account_id_str)
+    except ValueError:
+        return jsonify({'message': 'Invalid Account ID format. Must be an integer.'}), 400
+
+    # Ensure the current user is authorized for this account
+    user_account_ids = [ua.account_id for ua in current_user.accounts]
+    if account_id not in user_account_ids:
+        return jsonify({'message': 'User not authorized for this account'}), 403
+
+    try:
+        projects = Project.query.filter_by(account_id=account_id).all()
+
+        projects_data = [{
+            'id': project.id,
+            'name': project.name,
+            'description': project.description,
+            'start_date': project.start_date.isoformat() if project.start_date else None,
+            'end_date': project.end_date.isoformat() if project.end_date else None,
+            'account_id': project.account_id,
+            'created_by': project.created_by,
+            'created_at': project.created_at.isoformat(),
+            'updated_at': project.updated_at.isoformat()
+        } for project in projects]
+
+        return jsonify(projects_data), 200
+
+    except Exception as e:
+        print(f"Error fetching projects: {e}")
+        return jsonify({'message': 'Error fetching projects', 'error': str(e)}), 500
+
+@projects_bp.route('/projects/<int:project_id>', methods=['PUT'])
+@token_required
+def update_project(current_user, project_id):
+    """
+    Updates an existing project, including its tasks, hierarchy, and dependencies.
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'message': 'Project not found'}), 404
+
+    # Authorization check
+    user_account_ids = [ua.account_id for ua in current_user.accounts]
+    if project.account_id not in user_account_ids:
+        return jsonify({'message': 'User not authorized to modify this project'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'message': 'No input data provided'}), 400
+
+    try:
+        # 1. Update Project-level fields
+        project.name = data.get('name', project.name)
+        project.description = data.get('description', project.description)
+        project.updated_at = datetime.datetime.now(datetime.timezone.utc)
+
+        tasks_data = data.get('tasks', [])
+        
+        # 2. Sync Tasks (Delete, Update, Create)
+        # Get all tasks for this project from the DB to start
+        existing_tasks_query = Task.query.filter_by(project_id=project_id)
+        existing_tasks_map = {task.id: task for task in existing_tasks_query.all()}
+        existing_task_ids = set(existing_tasks_map.keys())
+
+        # Get all incoming task IDs that are actual database IDs (not UUIDs)
+        incoming_db_ids = {int(task.get('id')) for task in tasks_data if str(task.get('id', '')).isdigit()}
+        
+        # --- DELETE tasks that are in the DB but not in the incoming payload ---
+        ids_to_delete = existing_task_ids - incoming_db_ids
+        if ids_to_delete:
+            existing_tasks_query.filter(Task.id.in_(ids_to_delete)).delete(synchronize_session=False)
+
+        frontend_id_map = {} # Maps frontend UUIDs to backend Task objects
+        
+        # --- UPDATE existing tasks and CREATE new tasks ---
+        for task_data in tasks_data:
+            task_id_str = str(task_data.get('id', ''))
+            task_id = int(task_id_str) if task_id_str.isdigit() else None
+            
+            task = None
+            if task_id and task_id in existing_task_ids:
+                # This is an existing task to update
+                task = existing_tasks_map[task_id]
+            else:
+                # This is a new task to create
+                task = Task(project_id=project.id)
+                # THIS IS THE FIX: The `created_by` line is removed.
+                # It is not a field on the Task model.
+                db.session.add(task)
+            
+            # Update task fields from payload
+            task.name = task_data.get('name')
+            task.status = TaskStatusEnum[task_data.get('status', 'NOT_STARTED').upper()]
+            # The key from frontend's toJson is 'start_date'
+            task.start_date = datetime.datetime.fromisoformat(task_data.get('start_date').replace('Z', '+00:00'))
+            task.duration = task_data.get('duration')
+            
+            # Store the task object in our map, keyed by its frontend UUID
+            frontend_id_map[task_data.get('frontend_id')] = task
+            
+        db.session.flush() # Assign database IDs to any newly created tasks
+
+        # 3. Re-link Hierarchy and Dependencies
+        for task_data in tasks_data:
+            frontend_id = task_data.get('frontend_id')
+            task = frontend_id_map.get(frontend_id)
+            if not task: continue
+            
+            # Link Parent
+            parent_frontend_id = task_data.get('parent_id')
+            if parent_frontend_id and parent_frontend_id in frontend_id_map:
+                parent_task = frontend_id_map[parent_frontend_id]
+                task.parent_id = parent_task.id
+            else:
+                task.parent_id = None
+                
+            # Link Dependencies
+            task.dependencies.clear()
+            dependency_data = task_data.get('dependencies', [])
+            for dep in dependency_data:
+                dep_frontend_id = dep.get('depends_on_task_id')
+                prerequisite_task = frontend_id_map.get(str(dep_frontend_id))
+                if prerequisite_task:
+                    task.dependencies.append(prerequisite_task)
+
+        db.session.commit()
+        return jsonify({'message': 'Project updated successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating project: {e}")
+        # Be careful about exposing raw error strings in production
+        return jsonify({'message': 'An internal error occurred while updating the project', 'error': str(e)}), 500
+    
+@projects_bp.route('/projects/<int:project_id>', methods=['GET'])
+@token_required
+def get_project(current_user, project_id):
+    """
+    Retrieves a single project by its ID.
+    """
+    try:
+        project = Project.query.get(project_id)
+
+        if not project:
+            return jsonify({'message': 'Project not found'}), 404
+
+        # Ensure the current user is authorized for this project's account
+        user_account_ids = [ua.account_id for ua in current_user.accounts]
+        if project.account_id not in user_account_ids:
+            return jsonify({'message': 'User not authorized to view this project'}), 403
+
+        def _build_task_json(task):
+            task_json = {
+                'id': task.id,
+                'name': task.name,
+                'description': task.description,
+                'status': task.status.name,
+                'startDate': task.start_date.isoformat() if task.start_date else None,
+                'duration': task.duration, # Duration in seconds
+                'projectId': task.project_id,
+                'parentId': task.parent_id,
+                'assignedTo': task.assigned_to,
+                'dependencyIds': [dep.id for dep in task.dependencies],
+                'children': [], # Will be populated recursively
+            }
+            return task_json
+
+        # Fetch all tasks for the project
+        all_tasks = Task.query.filter_by(project_id=project_id).all()
+        
+        # Create a map for quick lookup and to store the JSON representation
+        task_map = {task.id: _build_task_json(task) for task in all_tasks}
+
+        # Build the hierarchy
+        for task in all_tasks:
+            if task.parent_id and task.parent_id in task_map:
+                task_map[task.parent_id]['children'].append(task_map[task.id])
+            # If a task has no parent_id, it's a top-level task.
+            # We don't need to explicitly add it to a top-level list here,
+            # as the frontend's _buildTaskHierarchy will handle it.
+            # However, we need to ensure all tasks are included in the 'tasks' list.
+
+        # Flatten the task_map values into a list for the frontend
+        # The frontend's _buildTaskHierarchy will reconstruct the tree
+        tasks_list_for_frontend = list(task_map.values())
+
+        project_data = {
+            'id': project.id,
+            'name': project.name,
+            'description': project.description,
+            'start_date': project.start_date.isoformat() if project.start_date else None,
+            'end_date': project.end_date.isoformat() if project.end_date else None,
+            'account_id': project.account_id,
+            'created_by': project.created_by,
+            'created_at': project.created_at.isoformat(),
+            'updated_at': project.updated_at.isoformat(),
+            'tasks': tasks_list_for_frontend # Include the tasks here
+        }
+        return jsonify(project_data), 200
+
+    except Exception as e:
+        print(f"Error fetching project by ID: {e}")
+        return jsonify({'message': 'Error fetching project', 'error': str(e)}), 500
