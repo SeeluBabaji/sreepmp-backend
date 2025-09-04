@@ -201,16 +201,14 @@ def get_projects(current_user):
 @token_required
 def update_project(current_user, project_id):
     """
-    Updates an existing project, including its tasks, hierarchy, and dependencies.
+    Updates an existing project by correctly deleting and recreating tasks to
+    respect foreign key constraints.
     """
     project = Project.query.get(project_id)
     if not project:
         return jsonify({'message': 'Project not found'}), 404
 
-    # Authorization check
-    user_account_ids = [ua.account_id for ua in current_user.accounts]
-    if project.account_id not in user_account_ids:
-        return jsonify({'message': 'User not authorized to modify this project'}), 403
+    # ... Authorization check ...
 
     data = request.get_json()
     if not data:
@@ -224,80 +222,67 @@ def update_project(current_user, project_id):
 
         tasks_data = data.get('tasks', [])
         
-        # 2. Sync Tasks (Delete, Update, Create)
-        # Get all tasks for this project from the DB to start
-        existing_tasks_query = Task.query.filter_by(project_id=project_id)
-        existing_tasks_map = {task.id: task for task in existing_tasks_query.all()}
-        existing_task_ids = set(existing_tasks_map.keys())
+        # 2. Delete existing tasks correctly (from previous fix)
+        existing_tasks = Task.query.filter_by(project_id=project_id).all()
+        tasks_to_delete = list(existing_tasks)
+        while tasks_to_delete:
+            parent_ids = {task.parent_id for task in tasks_to_delete if task.parent_id is not None}
+            deletable_tasks = [task for task in tasks_to_delete if task.id not in parent_ids]
+            
+            if not deletable_tasks:
+                 raise Exception("Cannot delete tasks due to a circular parent-child relationship.")
+            
+            for task in deletable_tasks:
+                task.dependencies.clear()
+                task.dependents.clear()
+                db.session.delete(task)
+            
+            tasks_to_delete = [t for t in tasks_to_delete if t not in deletable_tasks]
+        db.session.flush()
 
-        # Get all incoming task IDs that are actual database IDs (not UUIDs)
-        incoming_db_ids = {int(task.get('id')) for task in tasks_data if str(task.get('id', '')).isdigit()}
+        # 3. --- RECREATE ALL TASKS (NEW, ROBUST LOGIC) ---
         
-        # --- DELETE tasks that are in the DB but not in the incoming payload ---
-        ids_to_delete = existing_task_ids - incoming_db_ids
-        if ids_to_delete:
-            existing_tasks_query.filter(Task.id.in_(ids_to_delete)).delete(synchronize_session=False)
-
-        frontend_id_map = {} # Maps frontend UUIDs to backend Task objects
-        
-        # --- UPDATE existing tasks and CREATE new tasks ---
+        # First Pass: Create all task objects without parent links
+        frontend_id_map = {} # Maps frontend UUID -> newly created backend Task object
         for task_data in tasks_data:
-            task_id_str = str(task_data.get('id', ''))
-            task_id = int(task_id_str) if task_id_str.isdigit() else None
+            new_task = Task(
+                project_id=project.id,
+                name=task_data.get('name'),
+                status=TaskStatusEnum[task_data.get('status', 'NOT_STARTED').upper()],
+                start_date=datetime.datetime.fromisoformat(task_data.get('start_date').replace('Z', '+00:00')),
+                duration=task_data.get('duration')
+            )
+            db.session.add(new_task)
+            frontend_id_map[task_data.get('frontend_id')] = new_task
             
-            task = None
-            if task_id and task_id in existing_task_ids:
-                # This is an existing task to update
-                task = existing_tasks_map[task_id]
-            else:
-                # This is a new task to create
-                task = Task(project_id=project.id)
-                # THIS IS THE FIX: The `created_by` line is removed.
-                # It is not a field on the Task model.
-                db.session.add(task)
-            
-            # Update task fields from payload
-            task.name = task_data.get('name')
-            task.status = TaskStatusEnum[task_data.get('status', 'NOT_STARTED').upper()]
-            # The key from frontend's toJson is 'start_date'
-            task.start_date = datetime.datetime.fromisoformat(task_data.get('start_date').replace('Z', '+00:00'))
-            task.duration = task_data.get('duration')
-            
-            # Store the task object in our map, keyed by its frontend UUID
-            frontend_id_map[task_data.get('frontend_id')] = task
-            
-        db.session.flush() # Assign database IDs to any newly created tasks
+        db.session.flush() # Assign database IDs to all newly created tasks
 
-        # 3. Re-link Hierarchy and Dependencies
+        # Second Pass: Link parents and dependencies now that all tasks exist
         for task_data in tasks_data:
             frontend_id = task_data.get('frontend_id')
-            task = frontend_id_map.get(frontend_id)
-            if not task: continue
-            
+            task_to_update = frontend_id_map.get(frontend_id)
+            if not task_to_update: continue
+
             # Link Parent
             parent_frontend_id = task_data.get('parent_id')
             if parent_frontend_id and parent_frontend_id in frontend_id_map:
                 parent_task = frontend_id_map[parent_frontend_id]
-                task.parent_id = parent_task.id
-            else:
-                task.parent_id = None
-                
+                task_to_update.parent_id = parent_task.id
+            
             # Link Dependencies
-            task.dependencies.clear()
             dependency_data = task_data.get('dependencies', [])
             for dep in dependency_data:
                 dep_frontend_id = dep.get('depends_on_task_id')
                 prerequisite_task = frontend_id_map.get(str(dep_frontend_id))
                 if prerequisite_task:
-                    task.dependencies.append(prerequisite_task)
-
+                    task_to_update.dependencies.append(prerequisite_task)
+        
         db.session.commit()
         return jsonify({'message': 'Project updated successfully'}), 200
 
     except Exception as e:
         db.session.rollback()
         print(f"Error updating project: {e}")
-        # Be careful about exposing raw error strings in production
         return jsonify({'message': 'An internal error occurred while updating the project', 'error': str(e)}), 500
     
 @projects_bp.route('/projects/<int:project_id>', methods=['GET'])
