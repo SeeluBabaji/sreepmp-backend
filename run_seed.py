@@ -4,7 +4,7 @@ import argparse
 import datetime # Import datetime
 from sqlalchemy import text
 from app import create_app, db
-from app.models import Organization, AuthCode, Account, User # Import necessary models
+from app.models import Organization, AuthCode, Account, User,ProjectTemplate, TaskTemplate # Import necessary models
 #insert into organizations values (1,'org1','address1',null)
 def seed_data(delete=False):
     """Seeds the database with data from CSV files."""
@@ -71,6 +71,67 @@ def seed_data(delete=False):
                     print(f"Skipping AuthCode {row['auth_code']}: Account with ID {row['account_id']} not found.")
             db.session.commit()
             print("Seeded Auth Codes")
+            
+
+        if ProjectTemplate.query.first() is  None:
+            
+
+            print("Seeding project templates from CSVs...")
+            try:
+                # 1. Seed Project Templates
+                df_projects = pd.read_csv('seed/data/templates/project_templates.csv')
+                for _, row in df_projects.iterrows():
+                    project_template = ProjectTemplate(
+                        id=row['id'],
+                        name=row['name'],
+                        description=row['description']
+                    )
+                    db.session.add(project_template)
+                db.session.commit()
+                print(f"Seeded {len(df_projects)} Project Templates")
+
+                # 2. Seed Task Templates
+                df_tasks = pd.read_csv('seed/data/templates/task_templates.csv')
+                print("read seed/data/templates/task_templates.csv")
+                # Replace blank parent_id with None (for SQLAlchemy)
+                df_tasks['parent_id'] = df_tasks['parent_id'].astype('Int64').where(pd.notna(df_tasks['parent_id']), None)
+                
+                for _, row in df_tasks.iterrows():
+                    # Handle duration for parent tasks (which may be blank in the CSV)
+                    duration_days = row['duration_days'] if pd.notna(row['duration_days']) else 0
+                    parent_id_value = row['parent_id'] if pd.notna(row['parent_id']) else None
+                    task_template = TaskTemplate(
+                        id=row['id'],
+                        project_template_id=row['project_template_id'],
+                        name=row['name'],
+                        duration=int(duration_days * 86400), # Convert days to seconds
+                        parent_id=parent_id_value
+                    )
+                    db.session.add(task_template)
+                db.session.commit()
+                print(f"Seeded {len(df_tasks)} Task Templates")
+
+                # 3. Seed Dependencies
+                df_deps = pd.read_csv('seed/data/templates/task_template_dependencies.csv')
+                for _, row in df_deps.iterrows():
+                    # Find the actual TaskTemplate objects
+                    task = TaskTemplate.query.get(row['task_template_id'])
+                    depends_on_task = TaskTemplate.query.get(row['depends_on_task_template_id'])
+                    
+                    if task and depends_on_task:
+                        task.dependencies.append(depends_on_task)
+                    else:
+                        print(f"Warning: Could not create dependency for task_id {row['task_template_id']}. Task or dependency not found.")
+                
+                db.session.commit()
+                print(f"Seeded {len(df_deps)} Template Dependencies")
+
+            except FileNotFoundError as e:
+                print(f"Error seeding templates: Could not find a template CSV file. {e}")
+            except Exception as e:
+                db.session.rollback()
+                print(f"An error occurred during template seeding: {e}")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Seed the database.')

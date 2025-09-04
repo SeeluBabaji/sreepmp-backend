@@ -217,3 +217,54 @@ class AuthCode(db.Model):
 
     def __repr__(self):
         return f'<AuthCode {self.authcode}>'
+
+# ... (at the end of your models.py file)
+
+# --- TEMPLATE MODELS ---
+
+class ProjectTemplate(db.Model):
+    __tablename__ = 'project_templates'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), unique=True, nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    
+    tasks = db.relationship(
+        'TaskTemplate',
+        primaryjoin="and_(ProjectTemplate.id==TaskTemplate.project_template_id, TaskTemplate.parent_id==None)",
+        cascade="all, delete-orphan",
+        lazy="joined"
+    )
+
+    def __repr__(self):
+        return f'<ProjectTemplate {self.name}>'
+
+
+class TaskTemplate(db.Model):
+    __tablename__ = 'task_templates'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    # Durations are relative (in seconds), start dates are calculated on creation.
+    duration = db.Column(db.Integer, nullable=False, default=86400) # Default 1 day
+    
+    project_template_id = db.Column(db.Integer, db.ForeignKey('project_templates.id'), nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('task_templates.id'), nullable=True)
+    
+    children = db.relationship('TaskTemplate', backref=db.backref('parent', remote_side=[id]), cascade="all, delete-orphan")
+    
+    dependencies = db.relationship(
+        'TaskTemplate',
+        secondary='task_template_dependencies',
+        primaryjoin="TaskTemplate.id==task_template_dependencies.c.task_template_id",
+        secondaryjoin="TaskTemplate.id==task_template_dependencies.c.depends_on_task_template_id",
+        backref='dependents'
+    )
+
+    def __repr__(self):
+        return f'<TaskTemplate {self.name}>'
+
+
+# Association table for template dependencies
+task_template_dependencies = db.Table('task_template_dependencies',
+    db.Column('task_template_id', db.Integer, db.ForeignKey('task_templates.id'), primary_key=True),
+    db.Column('depends_on_task_template_id', db.Integer, db.ForeignKey('task_templates.id'), primary_key=True)
+)

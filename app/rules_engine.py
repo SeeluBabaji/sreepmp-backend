@@ -29,46 +29,9 @@ def get_dashboard_content(user):
     return dashboard_data
 
 def get_test_content(user, spiral=False):
-    """
-    Determines the test content to display to the user.
-    If spiral is True, it returns 20 random questions from modules with IDs less than the user's current_learning_focus_module_id.
-    """
-    if spiral:
-        # Fetch all questions from modules with IDs less than current_learning_focus_module_id
-        all_questions = TestQuestion.query.filter(
-            TestQuestion.modules_id < user.current_learning_focus_module_id
-        ).all()
-
-        # Randomly select 20 questions
-        if len(all_questions) > 20:
-            questions = random.sample(all_questions, 20)
-        else:
-            questions = all_questions
-    else:
-        problem_category = ProblemCategory.query.filter_by(slug=user.current_problem_category_slug).first()
-        if not problem_category:
-            return []
-
-        questions = TestQuestion.query.filter_by(
-            problem_category_slug=problem_category.slug,
-            modules_id=user.current_learning_focus_module_id
-        ).all()
-
-        if user.current_problem_category_slug == 'PSQ':
-            last_test_attempt = UserTestAttempt.query.filter_by(user_id=user.id).order_by(UserTestAttempt.submitted_at.desc()).first()
-            last_submitted_question_id = None
-            if last_test_attempt:
-                last_submitted_answer = UserTestAnswer.query.filter_by(
-                    user_test_attempt_id=last_test_attempt.id
-                ).order_by(UserTestAnswer.id.desc()).first()
-                if last_submitted_answer:
-                    last_submitted_question_id = last_submitted_answer.question_id
-            
-            if last_submitted_question_id:
-                questions = [q for q in questions if q.id >= last_submitted_question_id] #return including the last question submitted so that if learning content is not watched yet, then we can cover that case.TODO eventually if the last submitted was correct answer, then we can skip that question and change >= to simply >.
-
+    current_app.logger.error("Not implemented fro this product.")
     # Exclude 'correct_answer' from the response
-    return questions
+    return 
 
 def _generate_presigned_s3_url(object_name, expiration=3600):
    """Generate a pre-signed URL to share an S3 object."""

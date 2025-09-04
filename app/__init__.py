@@ -41,6 +41,9 @@ def create_app(config_name=None):
     from .routes.projects_routes import projects_bp
     app.register_blueprint(projects_bp, url_prefix='/api/v1')
 
+    from .routes.project_templates_routes import project_templates_bp
+    app.register_blueprint(project_templates_bp, url_prefix='/api/v1')
+
     # from .routes.user_routes import user_bp # Example for user specific routes
     # app.register_blueprint(user_bp, url_prefix='/api/v1/users')
 
