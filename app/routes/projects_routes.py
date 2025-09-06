@@ -65,95 +65,64 @@ def create_project(current_user):
         db.session.flush() # Flush to get new_project.id before committing
 
         # Dictionary to map frontend UUIDs to backend integer IDs
-        frontend_id_to_backend_task = {}
-        
-        # Use a deque for BFS-like processing to ensure parents are processed before children
-        # Each item in the deque will be (task_data_from_frontend, parent_backend_id)
-        q = deque([(task_data, None) for task_data in tasks_data if task_data.get('parent_id') is None])
+        if not tasks_data:
+            db.session.commit()
+            return jsonify({ 'message': 'Project created with no tasks', 'project_id': new_project.id }), 201
 
-        # Add children to the queue, ensuring all top-level tasks are processed first
-        # This handles the case where tasks_data might not be perfectly ordered
-        processed_frontend_ids = set(task_data.get('id') for task_data in tasks_data if task_data.get('parent_id') is None)
+        # --- REPLACED BFS LOGIC WITH THE ROBUST TWO-PASS ALGORITHM ---
         
-        while q:
-            task_data, parent_backend_id = q.popleft()
+        # Pass 1: Create all Task objects without parent links.
+        frontend_id_map = {} # Maps frontend UUID -> newly created backend Task object
+        for task_data in tasks_data:
+            # Note: The frontend sends 'start_date' from toJson, not 'startDate'
+            start_date_val = datetime.datetime.fromisoformat(task_data.get('start_date').replace('Z', '+00:00'))
             
-            frontend_task_id = task_data.get('id')
-            task_name = task_data.get('name')
-            task_status_str = task_data.get('status', 'NOT_STARTED').upper()
-            task_start_date_str = task_data.get('startDate')
-            task_duration_seconds = task_data.get('duration') # Duration is already in seconds from frontend
-
-            if not task_name:
-                raise ValueError(f"Task name is required for task with frontend ID {frontend_task_id}")
-
-            try:
-                task_status = TaskStatusEnum[task_status_str]
-            except KeyError:
-                raise ValueError(f"Invalid task status: {task_status_str}")
-
-            task_start_date = None
-            if task_start_date_str:
-                try:
-                    task_start_date = datetime.datetime.fromisoformat(task_start_date_str.replace('Z', '+00:00'))
-                except ValueError:
-                    raise ValueError(f"Invalid task start_date format for task {task_name}. Use ISO 8601.")
-
             new_task = Task(
-                name=task_name,
-                status=task_status,
-                start_date=task_start_date,
-                duration=task_duration_seconds,
                 project_id=new_project.id,
-                parent_id=parent_backend_id,
-                assigned_to=None # Assuming no assignment during creation
+                name=task_data.get('name'),
+                status=TaskStatusEnum[task_data.get('status', 'NOT_STARTED').upper()],
+                start_date=start_date_val,
+                duration=task_data.get('duration')
             )
             db.session.add(new_task)
-            db.session.flush() # Flush to get new_task.id
+            frontend_id_map[task_data.get('frontend_id')] = new_task
+            
+        # Flush the session to assign real database IDs to all newly created tasks.
+        db.session.flush()
 
-            frontend_id_to_backend_task[frontend_task_id] = new_task
-
-            # Add children of the current task to the queue
-            for child_task_data in tasks_data:
-                if child_task_data.get('parent_id') == frontend_task_id and child_task_data.get('id') not in processed_frontend_ids:
-                    q.append((child_task_data, new_task.id))
-                    processed_frontend_ids.add(child_task_data.get('id'))
-
-        # Process dependencies after all tasks are created and have backend IDs
+        # Pass 2: Link parents and dependencies now that all tasks exist in the session.
         for task_data in tasks_data:
-            frontend_task_id = task_data.get('id')
-            backend_task = frontend_id_to_backend_task.get(frontend_task_id)
-            if backend_task:
-                dependency_ids_frontend = task_data.get('dependencyIds', [])
-                for dep_frontend_id in dependency_ids_frontend:
-                    dependent_backend_task = frontend_id_to_backend_task.get(dep_frontend_id)
-                    if dependent_backend_task:
-                        backend_task.dependencies.append(dependent_backend_task)
-                    else:
-                        print(f"Warning: Frontend dependency ID {dep_frontend_id} not found in backend tasks.")
+            frontend_id = task_data.get('frontend_id')
+            task_to_update = frontend_id_map.get(frontend_id)
+            if not task_to_update: continue
+
+            # Link Parent
+            parent_frontend_id = task_data.get('parent_id')
+            if parent_frontend_id and parent_frontend_id in frontend_id_map:
+                parent_task = frontend_id_map[parent_frontend_id]
+                task_to_update.parent_id = parent_task.id
+            
+            # Link Dependencies
+            dependency_data = task_data.get('dependencies', [])
+            for dep in dependency_data:
+                dep_frontend_id = dep.get('depends_on_task_id')
+                # Frontend might send int or string, ensure it's a string for the map lookup.
+                prerequisite_task = frontend_id_map.get(str(dep_frontend_id))
+                if prerequisite_task:
+                    task_to_update.dependencies.append(prerequisite_task)
         
         db.session.commit()
 
         return jsonify({
             'message': 'Project and tasks created successfully',
-            'project': {
-                'id': new_project.id,
-                'name': new_project.name,
-                'description': new_project.description,
-                'start_date': new_project.start_date.isoformat() if new_project.start_date else None,
-                'end_date': new_project.end_date.isoformat() if new_project.end_date else None,
-                'account_id': new_project.account_id,
-                'created_by': new_project.created_by,
-                'created_at': new_project.created_at.isoformat(),
-                'updated_at': new_project.updated_at.isoformat(),
-                'tasks_count': len(frontend_id_to_backend_task)
-            }
+            'project': { 'id': new_project.id, 'name': new_project.name }
         }), 201
+        
     except Exception as e:
         db.session.rollback()
         print(f"Error during project creation: {e}")
-        return jsonify({'message': 'Error creating project and tasks', 'error': str(e)}), 500
-
+        return jsonify({'message': 'Error creating project', 'error': str(e)}), 500
+    
 @projects_bp.route('/projects', methods=['GET'])
 @token_required
 def get_projects(current_user):
